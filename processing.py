@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import re
-from time import time
-import rapidfuzz
 import strsimpy
 import requests
 import io
@@ -40,45 +38,35 @@ def clean_str(text):
     if pd.isna(text):
         return
 
-    text = re.sub(r"ñ", "n", text)  # Replace "ñ" with "n"
-    text = re.sub(r"Ñ", "N", text)  # Replace "Ñ" with "N"
-    text = re.findall(r"[a-zA-Z0-9]", text) # Select only letters and digits
-    text = "".join(text) # remove all spaces
-    text = text.lower() # lowercase all
-
-    return text
+    return re.sub(r"[^a-zA-Z0-9]", "", text).replace("ñ", "n").replace("Ñ", "N").lower()
 
 def setup_df_needle(df1):
-    df1["part_number_clean"] = df1["part_number"].apply(clean_str)
-    df1["product_clean"] = df1["product"].apply(clean_str)
-    df1["category_clean"] = df1["category"].apply(clean_str)
-    df1["brand_clean"] = df1["brand"].apply(clean_str)
+    df1["part_number_clean"] = df1["part_number"].map(clean_str)
+    df1["product_clean"] = df1["product"].map(clean_str)
+    df1["category_clean"] = df1["category"].map(clean_str)
+    df1["brand_clean"] = df1["brand"].map(clean_str)
 
     return df1
 
 def setup_df_haystack(api_call):
     df2 = request_redash_goparts_product_query(api_call)
-    df2["part_number_clean"] = df2["part_number"].apply(clean_str)
-    df2["product_clean"] = df2["product"].apply(clean_str)
-    df2["category_clean"] = df2["category"].apply(clean_str)
-    df2["brand_clean"] = df2["brand"].apply(clean_str)
-    df_category = df2[["pc_id", "category", "category_clean"]].drop_duplicates()
-    df_brand = df2[["ib_id", "brand", "brand_clean"]].drop_duplicates()
+    df2_category =  df2[["pc_id", "category"]].drop_duplicates()
+    df2_brand = df2[["ib_id", "brand"]].drop_duplicates()
 
-    return df2, df_category, df_brand
+    df2["part_number_clean"] = df2["part_number"].map(clean_str)
+    df2["product_clean"] = df2["product"].map(clean_str)
+    df2_category["category_clean"] = df2_category["category"].map(clean_str)
+    df2_brand["brand_clean"] = df2_brand["brand"].map(clean_str)
 
-def levenshtein(str1, str2): # fast, simple
-    if pd.isna(str1) or pd.isna(str2):
-        return
-    score = rapidfuzz.distance.Levenshtein.normalized_similarity(str1, str2)
+    df2_category.drop(columns=["category"], inplace=True)
+    df2_brand.drop(columns=["brand"], inplace=True)
 
-    return score
+    return df2, df2_category, df2_brand
 
 def jaccard(str1, str2): # complex, better for filtering out accidental matches
     if pd.isna(str1) or pd.isna(str2):
         return
-    n = 3 # based on the shortest part number in DB
-    score = strsimpy.Jaccard(n).similarity(str1, str2)
+    score = strsimpy.Jaccard(3).similarity(str1, str2)
 
     return score
 
@@ -111,7 +99,9 @@ def row_average(row2):
         sum_row += weight*brand_score
         n += weight
 
-    return sum_row/max(1, n)
+    weighted_average = sum_row/max(1, n)
+
+    return weighted_average
 
 def details_concat(row1):
     part_number = row1["part_number"]
@@ -150,47 +140,38 @@ def match_concat(row1, row2):
 
     return match_concat_str
 
-def rgb_0_1_to_hex(r, g, b):
-    return f"#{round(r * 255):02X}{round(g * 255):02X}{round(b * 255):02X}"
+def match_string(row1, df2, df2_category, df2_brand):
+        df2["part_number_score"] = df2["part_number_clean"].map(lambda row2: jaccard(row1["part_number_clean"], row2))
+        df2["product_score"] = df2["product_clean"].map(lambda row2: jaccard(row1["product_clean"], row2))
+        df2_category["category_score"] = df2_category["category_clean"].map(lambda row2: jaccard(row1["category_clean"], row2))
+        df2_brand["brand_score"] = df2_brand["brand_clean"].map(lambda row2: jaccard(row1["brand_clean"], row2))
 
-def match_strings(df1, api_call):
-    df1 = setup_df_needle(df1)
-    df2, df_category, df_brand = setup_df_haystack(api_call)
-    cols = ["part_number", "product", "category", "brand"]
+        df_result = df2.merge(df2_category, on="pc_id", how="left").merge(df2_brand, on="ib_id", how="left")
 
-    def match_string(row1):
-        df_copy = df2.copy()
-        for col in cols:
-            col_clean = col + "_clean"
-            col_score = col + "_score"
-            str1_clean = row1[col_clean]
-            if col == "part_number" or col == "product":
-                df_copy[col_score] = df_copy.apply(lambda row2: jaccard(str1_clean, row2[col_clean]), axis=1)
-            elif col == "category":
-                df_category[col_score] = df_category.apply(lambda row2: jaccard(str1_clean, row2[col_clean]), axis=1)
-                df_copy = df_copy.merge(df_category[["pc_id", "category_score"]], on="pc_id", how="left")
-            elif col == "brand":
-                df_brand[col_score] = df_brand.apply(lambda row2: jaccard(str1_clean, row2[col_clean]), axis=1)
-                df_copy = df_copy.merge(df_brand[["ib_id", "brand_score"]], on="ib_id", how="left")
+        df2.drop(columns=["part_number_score", "product_score"], inplace=True)
+        df2_category.drop(columns=["category_score"], inplace=True)
+        df2_brand.drop(columns=["brand_score"], inplace=True)
 
-        df_copy["average_score"] = df_copy.apply(row_average, axis=1)
-        df_copy["match_concat"] = df_copy.apply(lambda row2: match_concat(row1, row2), axis=1)
-
-        df_copy = df_copy.sort_values(by=["average_score", "tier_1"], ascending=[False, True])[["match_concat", "p_id", "average_score", "cost", "tier_1"]].head(2)
-        str_high2, id_high2, score2, cost2, tier1_2 = df_copy.values[0]
-        str_high3, id_high3, score3, cost3, tier1_3 = df_copy.values[1]
+        df_result["average_score"] = df_result.apply(row_average, axis=1)
+        df_result["match_concat"] = df_result.apply(lambda row2: match_concat(row1, row2), axis=1)
+        df_result.sort_values(by=["average_score", "tier_1"], ascending=[False, True], inplace=True)
+        df_first2 = df_result.head(2)[["match_concat", "p_id", "average_score", "cost", "tier_1"]]
+        str_high2, id_high2, score2, cost2, tier1_2 = df_first2.iloc[0]
+        str_high3, id_high3, score3, cost3, tier1_3 = df_first2.iloc[1]
         delta = score2 - score3
 
         return str_high2, str_high3, cost2, tier1_2, cost3, tier1_3, id_high2, id_high3, score2, score3, delta
 
-    results = df1.apply(match_string, axis=1)
-    #   str_high2, str_high3, id_high2,  id_high3, score2, score3, delta
+def match_strings(df1, api_call):
+    df1 = setup_df_needle(df1)
+    df2, df2_category, df2_brand = setup_df_haystack(api_call)
+    results = df1.apply(lambda row1: match_string(row1, df2, df2_category, df2_brand), axis=1)
     df1[["match1", "match2", "match1_cost", "match1_tier_1", "match2_cost", "match2_tier_1", "id1", "id2", "score1", "score2", "delta_score"]] = pd.DataFrame(results.to_list(), index=results.index)
 
-    df1["score1"] = np.round(np.multiply(100, df1["score1"]), 2)
-    df1["score2"] = np.round(np.multiply(100, df1["score2"]), 2)
-    df1["delta_score"] = np.round(np.multiply(100, df1["delta_score"]), 2)
-    df1["relative_error"] = np.round(np.multiply(100, np.divide(np.subtract(df1["score1"], df1["score2"]), df1["score1"])), 2)
+    df1["score1"] = np.round(100*df1["score1"], 2)
+    df1["score2"] = np.round(100*df1["score2"], 2)
+    df1["delta_score"] = np.round(100*df1["delta_score"], 2)
+    df1["relative_error"] = np.round(100*(df1["score1"] - df1["score2"])/df1["score1"], 2)
 
     df1["details"] = df1.apply(details_concat, axis=1)
     df1 = df1[["details", "match1", "match2", "match1_cost", "match1_tier_1", "match2_cost", "match2_tier_1", "id1", "id2", "score1", "score2", "delta_score", "relative_error" ]]

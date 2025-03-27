@@ -1,3 +1,4 @@
 .streamlit/secrets.toml
 .vscode/settings.json
 __pycache__/processing.cpython-313.pyc
+__pycache__/processing_optimized.cpython-313.pyc

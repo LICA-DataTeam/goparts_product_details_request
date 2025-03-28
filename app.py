@@ -51,3 +51,18 @@ else:
     except requests.ConnectionError:
         st.error("Failed to connect to the database API. Please check your internet connection or try again later.")
 
+st.subheader("Intended Workflow")
+
+"1. **Download Request Form**: Users can download a blank request form provided in the app. The request form must have the columns part_number, product, category, and brand (case-sensitive) for the algorithm to process the request form. Each row must contain at least a part_number, or product. The category and brand are optional but help the algorithm to find a better match."
+""
+"2. **Fill out the Request Form**: Users input the product details they want to request on the request form."
+""
+"3. **Display Results**: The app displays the processed results, including the details of the input data and the closest matches with their costs, tiers, and similarity scores."
+""
+"4. **Download Results**: Users can download the processed results as an Excel file for further review."
+""
+"5. **Review Results**: - Review results if the matched products are correct."
+""
+""
+""
+st.info("If you have questions or suggestions, reach out to John Paul L. Santos of the Data Team. Thank you\!")
